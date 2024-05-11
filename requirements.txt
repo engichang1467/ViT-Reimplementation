@@ -1,0 +1,6 @@
+torch
+torchvision
+datasets
+einops
+tqdm
+black
