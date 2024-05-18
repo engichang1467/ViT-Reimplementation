@@ -43,6 +43,9 @@ def train_model(config):
     train_loader = DataLoader(
         train_dataset, batch_size=config["batch_size"], shuffle=True
     )
+    test_loader = DataLoader(
+        val_dataset, batch_size=config["batch_size"], shuffle=False
+    )
 
     # Instantiate the model and move to GPU if available
     model = VisionTransformer(config)
@@ -84,6 +87,25 @@ def train_model(config):
             counter += 1
 
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss / len(train_loader)}")
+
+        model.eval()
+        val_loss = 0
+        val_accuracy = 0
+        with torch.no_grad():
+            for images, labels in test_loader:
+
+                images = images.to(device)
+                labels = labels.to(device)
+
+                output = model(images)
+                val_loss += criterion(output, labels).item()
+                val_accuracy += (output.argmax(dim=1) == labels).float().mean().item()
+
+        # Calculate average loss and accuracy for the validation
+        val_loss /= len(test_loader)
+        val_accuracy /= len(test_loader)
+
+        print(f"Val Loss: {val_loss}, Val Accuracy: {val_accuracy}")
 
         model_filename = get_weights_file_path(config, f"{counter}")
 
