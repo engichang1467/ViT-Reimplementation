@@ -4,6 +4,7 @@ from torchvision import transforms
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import Dataset, DataLoader
 
+import warnings
 from tqdm import tqdm
 from pathlib import Path
 from datasets import load_dataset
@@ -26,7 +27,7 @@ def train_model(config):
         [
             transforms.Resize((config["image_size"], config["image_size"])),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
         ]
     )
 
@@ -54,60 +55,82 @@ def train_model(config):
     # Loss and optimizer
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
-    scaler = GradScaler()  # For automatic mixed precision
+    scaler = GradScaler(enabled=True)  # For automatic mixed precision
 
     grad_accumulation_steps = config["batch_size"]
     num_epochs = config["num_epoch"]
+
+    training_accuracies = []
+    training_losses = []
+    val_losses = []
+    val_accuracies = []
 
     # Training loop
     for epoch in range(num_epochs):
         torch.cuda.empty_cache()
         model.train()
-        total_loss = 0
-
-        counter = 0
-        batch_iterator = tqdm(train_loader, desc=f"Processing epoch {epoch:02d}")
+        total_loss, total_accuracy = 0, 0
+        main_total = 0
+    
+        batch_iterator = tqdm(train_loader, desc=f"Processing epoch (train) {epoch:02d}")
         for step, (images, labels) in enumerate(batch_iterator):
             images, labels = images.to(device), labels.to(device)
 
             # Forward pass with automatic mixed precision
-            with autocast():
-                outputs = model(images)
-                loss = criterion(outputs, labels)
+            with autocast(enabled=True):
+                output = model(images)
+                loss = criterion(output, labels)
 
             # Backward pass and optimization with gradient accumulation
             scaler.scale(loss).backward()
-            if (step + 1) % grad_accumulation_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
-            total_loss += loss.item() * grad_accumulation_steps
+            total_loss += loss.item()
+            
+            predicted = (output.argmax(dim=1) == labels).float().mean()
+            total_accuracy += predicted.item()
 
-            counter += 1
+        avg_train_loss = total_loss / len(train_loader)
+        avg_train_accuracy = total_accuracy / main_total
 
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss / len(train_loader)}")
+        training_accuracies.append(avg_train_accuracy)
+        training_losses.append(avg_train_loss)
+
+
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_train_loss}, Accuracy: {avg_train_accuracy}")
 
         model.eval()
-        val_loss = 0
-        val_accuracy = 0
-        with torch.no_grad():
-            for images, labels in test_loader:
+        val_loss, val_accuracy = 0, 0
+        total_val_accuracy = 0
 
-                images = images.to(device)
-                labels = labels.to(device)
+        with torch.no_grad():
+            batch_iterator = tqdm(test_loader, desc=f"Processing epoch (test) {epoch:02d}")
+            for step, (images, labels) in enumerate(batch_iterator):
+
+                images, labels = images.to(device), labels.to(device)
 
                 output = model(images)
-                val_loss += criterion(output, labels).item()
-                val_accuracy += (output.argmax(dim=1) == labels).float().mean().item()
+                loss = criterion(output, labels)
+
+                val_loss += loss.item() # * grad_accumulation_steps
+
+                _, predicted = output.max(1)
+
+                val_accuracy += predicted.eq(labels).sum().item()
+                total_val_accuracy += labels.size(0)
 
         # Calculate average loss and accuracy for the validation
-        val_loss /= len(test_loader)
-        val_accuracy /= len(test_loader)
+        avg_val_loss = val_loss / len(test_loader)
+        avg_val_accuracy = val_accuracy / total_val_accuracy
 
-        print(f"Val Loss: {val_loss}, Val Accuracy: {val_accuracy}")
+        val_losses.append(avg_val_loss)
+        val_accuracies.append(avg_val_accuracy)
 
-        model_filename = get_weights_file_path(config, f"{counter}")
+        print(f"Val Loss: {avg_val_loss}, Val Accuracy: {avg_val_accuracy}")
+
+        model_filename = get_weights_file_path(config, f"{epoch}")
 
         torch.save(
             {
@@ -118,6 +141,30 @@ def train_model(config):
             },
             model_filename,
         )
+
+        total_loss, total_accuracy, main_total = 0, 0, 0
+
+    # Open a text file in write mode
+    # Add performance data in text
+    with open("data.txt", "w") as file:
+        # Loop through the array and write each element to the file
+        res = "training_accuracies = ["
+        for data in training_accuracies:
+            res += str(data) + ", "
+        res = "]\ntraining_losses = ["
+        for data in training_losses:
+            res += str(data) + ", "
+        res += "]\nval_losses = ["
+        for data in val_losses:
+            res += str(data) + ", "
+        res += "]\nval_accuracies = ["
+        for data in val_accuracies:
+            res += str(data) + ", "
+        res += "]\n"
+            
+        file.write(res)  # Write the item followed by a newline character
+
+    print("Data has been written to data.txt")
 
 
 if __name__ == "__main__":
